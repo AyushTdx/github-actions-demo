@@ -1,0 +1,39 @@
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 3
+
+      - name: Review pull request with Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Review this pull request.
+
+            Focus on:
+            - Bugs and incorrect logic
+            - Security issues
+            - Error handling
+            - Performance concerns
+            - Code readability
+            - Missing tests
+
+            Review the complete pull request diff.
+            Add inline comments for specific issues.
+            Add a summary comment for general observations.
+            Do not modify repository files.
