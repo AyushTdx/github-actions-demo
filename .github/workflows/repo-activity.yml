@@ -5,38 +5,47 @@ run-name: ${{ github.actor }} is testing out GitHub Actions 🚀
 on:
   push:
   pull_request:
+    types: [opened, synchronize, closed]
 
 jobs:
   explore-github-actions:
     runs-on: ubuntu-latest
 
     steps:
-      - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
+      - run: echo "🎉 Triggered by a ${{ github.event_name }} event."
 
-      - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub!"
+      - run: echo "🐧 Running on ${{ runner.os }} hosted by GitHub."
 
-      - run: echo "🔎 The branch is ${{ github.ref }} and the repository is ${{ github.repository }}."
+      - run: echo "🔎 Branch: ${{ github.ref }}"
 
       - name: Check out repository code
         uses: actions/checkout@v6
 
-      - run: echo "💡 The ${{ github.repository }} repository has been cloned to the runner."
-
-      - run: echo "🖥️ The workflow is now ready to test your code."
-
-      - name: List files in the repository
+      - name: List files
         run: ls "${{ github.workspace }}"
 
-      - run: echo "🍏 This job's status is ${{ job.status }}."
+      - run: echo "🍏 Job status is ${{ job.status }}."
 
   check-pull-request-event:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check event type
+      - name: Confirm pull request event
         if: ${{ github.event_name == 'pull_request' }}
         run: echo "This is a pull request event."
 
       - name: Handle non-pull-request event
         if: ${{ github.event_name != 'pull_request' }}
         run: echo "This is not a pull request event."
+
+  check-merge-event:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Confirm merged pull request
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.merged == true }}
+        run: echo "This pull request was merged."
+
+      - name: Handle non-merged event
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.merged != true }}
+        run: echo "This was not a merged pull request."
