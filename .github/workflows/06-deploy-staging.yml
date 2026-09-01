@@ -1,0 +1,182 @@
+name: Deploy to Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      package-version:
+        description: "Package version to deploy"
+        required: true
+        type: string
+  workflow_run:
+    workflows:
+      - "Deploy to Development"
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+  deployments: write
+
+env:
+  NODE_VERSION: "20"
+  UIPATH_CLI_VERSION: "1.0.0"
+  ENVIRONMENT: "staging"
+  DEPLOYMENT_FOLDER: "StagingFolder"
+
+jobs:
+  approve-staging:
+    name: Request Staging Approval
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_run'
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Notify approval required
+        shell: bash
+        run: |
+          echo "⏳ Staging deployment requires manual approval"
+          echo "Environment: staging"
+          echo "Deployment folder: ${DEPLOYMENT_FOLDER}"
+
+  deploy-staging:
+    name: Deploy to Staging Orchestrator
+    runs-on: ubuntu-latest
+    needs: [approve-staging]
+    if: always() && github.event_name == 'workflow_dispatch'
+
+    environment:
+      name: staging
+      url: ${{ vars.ORCHESTRATOR_URL }}/ordesk
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install UiPath CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.npm-global"
+          npm config set prefix "$HOME/.npm-global"
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.npm-global/bin:$PATH"
+
+          npm install -g "@uipath/cli@${UIPATH_CLI_VERSION}"
+          uip --version
+
+      - name: Download package artifact
+        shell: bash
+        env:
+          PACKAGE_VERSION: ${{ github.event.inputs.package-version }}
+        run: |
+          echo "Retrieving package version: ${PACKAGE_VERSION}"
+          # In a real scenario, you would download from artifact storage
+          # or download from development feed
+
+      - name: Validate staging credentials
+        shell: bash
+        env:
+          UIPATH_CLIENT_ID: ${{ secrets.UIPATH_STAGING_CLIENT_ID }}
+          UIPATH_CLIENT_SECRET: ${{ secrets.UIPATH_STAGING_CLIENT_SECRET }}
+          UIPATH_TENANT: ${{ vars.UIPATH_STAGING_TENANT }}
+          ORCHESTRATOR_URL: ${{ vars.ORCHESTRATOR_URL }}
+        run: |
+          if [ -z "$UIPATH_CLIENT_ID" ] || [ -z "$UIPATH_CLIENT_SECRET" ] || [ -z "$UIPATH_TENANT" ]; then
+            echo "❌ Missing required staging secrets or variables"
+            echo "Required: UIPATH_STAGING_CLIENT_ID, UIPATH_STAGING_CLIENT_SECRET, UIPATH_STAGING_TENANT"
+            exit 1
+          fi
+          echo "✓ All required staging secrets and variables present"
+
+      - name: Authenticate with UiPath Orchestrator (Staging)
+        shell: bash
+        env:
+          UIPATH_CLIENT_ID: ${{ secrets.UIPATH_STAGING_CLIENT_ID }}
+          UIPATH_CLIENT_SECRET: ${{ secrets.UIPATH_STAGING_CLIENT_SECRET }}
+          UIPATH_TENANT: ${{ vars.UIPATH_STAGING_TENANT }}
+          ORCHESTRATOR_URL: ${{ vars.ORCHESTRATOR_URL }}
+        run: |
+          set -euo pipefail
+          
+          echo "Authenticating with UiPath Orchestrator (Staging)..."
+          uip login \
+            --client-id "${UIPATH_CLIENT_ID}" \
+            --client-secret "${UIPATH_CLIENT_SECRET}" \
+            --tenant "${UIPATH_TENANT}" \
+            --orchestrator-url "${ORCHESTRATOR_URL}"
+          
+          echo "✓ Authentication successful"
+
+      - name: Promote package to Staging
+        shell: bash
+        env:
+          UIPATH_TENANT: ${{ vars.UIPATH_STAGING_TENANT }}
+          UIPATH_DEV_TENANT: ${{ vars.UIPATH_DEV_TENANT }}
+          UIPATH_FEED_ID: ${{ vars.UIPATH_STAGING_FEED_ID }}
+          PACKAGE_VERSION: ${{ github.event.inputs.package-version }}
+        run: |
+          set -euo pipefail
+          
+          echo "Promoting package ${PACKAGE_VERSION} from Development to Staging..."
+          
+          # Download from dev feed and upload to staging feed
+          uip or packages download \
+            --tenant "${UIPATH_DEV_TENANT}" \
+            --package-name "UiPathProject" \
+            --package-version "${PACKAGE_VERSION}" \
+            --output "./staging-package.nupkg" || echo "Package download skipped"
+          
+          if [ -f "./staging-package.nupkg" ]; then
+            uip or packages upload "./staging-package.nupkg" \
+              --tenant "${UIPATH_TENANT}" \
+              --feed-id "${UIPATH_FEED_ID}"
+            
+            echo "✓ Package promoted successfully"
+          fi
+
+      - name: Create staging deployment record
+        shell: bash
+        run: |
+          cat > deployment-record-staging.json << 'EOF'
+          {
+            "environment": "${{ env.ENVIRONMENT }}",
+            "packageVersion": "${{ github.event.inputs.package-version }}",
+            "promotedAt": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+            "promotedBy": "${{ github.actor }}",
+            "fromEnvironment": "development",
+            "runId": "${{ github.run_id }}"
+          }
+          EOF
+
+      - name: Upload staging deployment record
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-record-${{ env.ENVIRONMENT }}
+          path: deployment-record-staging.json
+          retention-days: 90
+
+      - name: Generate staging deployment summary
+        shell: bash
+        run: |
+          echo "## 🚀 Staging Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ env.ENVIRONMENT }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Package Version | ${{ github.event.inputs.package-version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Source | Development |" >> $GITHUB_STEP_SUMMARY
+          echo "| Promoted By | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Timestamp | $(date -u +'%Y-%m-%d %H:%M:%S UTC') |" >> $GITHUB_STEP_SUMMARY

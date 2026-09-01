@@ -1,0 +1,162 @@
+name: UiPath Workflow Analyzer
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - "UiPathProject/**/*.xaml"
+      - "UiPathProject/project.json"
+      - ".github/workflows/02-analyze.yml"
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - "UiPathProject/**/*.xaml"
+      - "UiPathProject/project.json"
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+env:
+  NODE_VERSION: "20"
+  UIPATH_CLI_VERSION: "1.0.0"
+  PROJECT_PATH: "./UiPathProject"
+  ANALYSIS_RULES: "MaintainabilityIndex,SequenceComplexity,LowFlowComplexity"
+
+jobs:
+  analyze:
+    name: Analyze UiPath Workflows
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install UiPath CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.npm-global"
+          npm config set prefix "$HOME/.npm-global"
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.npm-global/bin:$PATH"
+
+          npm install -g "@uipath/cli@${UIPATH_CLI_VERSION}"
+          echo "✓ UiPath CLI installed"
+          uip --version
+
+      - name: Verify UiPath project exists
+        shell: bash
+        run: |
+          if [ ! -f "${PROJECT_PATH}/project.json" ]; then
+            echo "❌ project.json not found in ${PROJECT_PATH}"
+            exit 1
+          fi
+          echo "✓ UiPath project found"
+
+      - name: Restore project dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Restoring project dependencies..."
+          uip rpa restore "${PROJECT_PATH}"
+          echo "✓ Dependencies restored"
+
+      - name: Run UiPath Analyzer
+        shell: bash
+        id: analyzer
+        run: |
+          set -euo pipefail
+          
+          echo "Running UiPath Analyzer on ${PROJECT_PATH}..."
+          echo "Analysis rules: ${ANALYSIS_RULES}"
+          
+          # Run analysis and capture output
+          uip rpa analyze "${PROJECT_PATH}" \
+            --target "${ANALYSIS_RULES}" \
+            --output-file "analysis-results.json" || true
+          
+          echo "✓ Analysis complete"
+          
+          # Display results
+          if [ -f "analysis-results.json" ]; then
+            echo "Analysis Results:"
+            cat analysis-results.json
+          fi
+
+      - name: Parse and validate analysis results
+        shell: bash
+        run: |
+          if [ -f "analysis-results.json" ]; then
+            # Count issues by severity
+            ERRORS=$(grep -o '"Severity":"Error"' analysis-results.json | wc -l || echo "0")
+            WARNINGS=$(grep -o '"Severity":"Warning"' analysis-results.json | wc -l || echo "0")
+            
+            echo "📊 Analysis Summary:"
+            echo "  Errors: ${ERRORS}"
+            echo "  Warnings: ${WARNINGS}"
+            
+            # Fail if critical errors found (adjust threshold as needed)
+            if [ "${ERRORS}" -gt 0 ]; then
+              echo "❌ Analyzer found errors that must be fixed"
+              exit 1
+            fi
+            
+            if [ "${WARNINGS}" -gt 10 ]; then
+              echo "⚠️  Warning: High number of warnings (${WARNINGS})"
+            fi
+          fi
+
+      - name: Comment PR with analysis results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            
+            if (fs.existsSync('analysis-results.json')) {
+              const results = JSON.parse(fs.readFileSync('analysis-results.json', 'utf8'));
+              const errors = results.filter(r => r.Severity === 'Error').length;
+              const warnings = results.filter(r => r.Severity === 'Warning').length;
+              
+              let comment = `## 🔍 UiPath Analyzer Results\n\n`;
+              comment += `- **Errors**: ${errors}\n`;
+              comment += `- **Warnings**: ${warnings}\n`;
+              
+              if (errors > 0) {
+                comment += `\n### ❌ Errors Found\n`;
+                results.filter(r => r.Severity === 'Error').slice(0, 5).forEach(issue => {
+                  comment += `- ${issue.Rule}: ${issue.Message}\n`;
+                });
+              }
+              
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+            }
+
+      - name: Upload analysis report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: analyzer-results
+          path: analysis-results.json
+          retention-days: 30

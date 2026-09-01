@@ -1,0 +1,101 @@
+name: Restore Dependencies
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - "UiPathProject/project.json"
+      - "UiPathProject/package.json"
+      - ".github/workflows/01-dependencies-restore.yml"
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - "UiPathProject/project.json"
+      - "UiPathProject/package.json"
+
+permissions:
+  contents: read
+  checks: write
+
+env:
+  NODE_VERSION: "20"
+  UIPATH_CLI_VERSION: "1.0.0"
+  PROJECT_PATH: "./UiPathProject"
+
+jobs:
+  restore-dependencies:
+    name: Restore UiPath Project Dependencies
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install UiPath CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.npm-global"
+          npm config set prefix "$HOME/.npm-global"
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.npm-global/bin:$PATH"
+
+          npm install -g "@uipath/cli@${UIPATH_CLI_VERSION}"
+          echo "✓ UiPath CLI installed"
+          uip --version
+
+      - name: Verify UiPath project.json exists
+        shell: bash
+        run: |
+          if [ ! -f "${PROJECT_PATH}/project.json" ]; then
+            echo "❌ project.json not found in ${PROJECT_PATH}"
+            exit 1
+          fi
+          echo "✓ project.json found"
+
+      - name: Restore project dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Restoring dependencies from ${PROJECT_PATH}..."
+          uip rpa restore "${PROJECT_PATH}"
+          echo "✓ Dependencies restored successfully"
+
+      - name: Verify project structure
+        shell: bash
+        run: |
+          echo "Project structure after restore:"
+          find "${PROJECT_PATH}" -type f -name "*.json" | head -20
+          if [ -d "${PROJECT_PATH}/dependencies" ]; then
+            echo "✓ Dependencies directory exists"
+            ls -la "${PROJECT_PATH}/dependencies" | head -10
+          fi
+
+      - name: Create dependency cache key
+        id: cache-key
+        shell: bash
+        run: |
+          CACHE_KEY="uipath-deps-${{ hashFiles('UiPathProject/package.json', 'UiPathProject/project.json') }}"
+          echo "cache-key=${CACHE_KEY}" >> "$GITHUB_OUTPUT"
+          echo "Cache key: ${CACHE_KEY}"
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.PROJECT_PATH }}/dependencies
+          key: ${{ steps.cache-key.outputs.cache-key }}
+          restore-keys: |
+            uipath-deps-

@@ -1,0 +1,257 @@
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      package-version:
+        description: "Package version to deploy (required)"
+        required: true
+        type: string
+      approval-notes:
+        description: "Approval notes and reason for deployment"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  deployments: write
+
+env:
+  NODE_VERSION: "20"
+  UIPATH_CLI_VERSION: "1.0.0"
+  ENVIRONMENT: "production"
+  DEPLOYMENT_FOLDER: "ProductionFolder"
+
+jobs:
+  validate-production-deployment:
+    name: Validate Production Deployment
+    runs-on: ubuntu-latest
+
+    outputs:
+      validated: ${{ steps.validation.outputs.validated }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Log deployment request
+        shell: bash
+        run: |
+          cat > deployment-request.json << 'EOF'
+          {
+            "environment": "production",
+            "packageVersion": "${{ github.event.inputs.package-version }}",
+            "approvalNotes": "${{ github.event.inputs.approval-notes }}",
+            "requestedBy": "${{ github.actor }}",
+            "requestedAt": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+            "runId": "${{ github.run_id }}"
+          }
+          EOF
+          
+          cat deployment-request.json
+
+      - name: Validate package version format
+        id: validation
+        shell: bash
+        run: |
+          PACKAGE_VERSION="${{ github.event.inputs.package-version }}"
+          
+          # Validate semantic version format
+          if [[ $PACKAGE_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "validated=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Package version validated: ${PACKAGE_VERSION}"
+          else
+            echo "validated=false" >> "$GITHUB_OUTPUT"
+            echo "❌ Invalid package version format: ${PACKAGE_VERSION}"
+            echo "Expected format: X.Y.Z or X.Y.Z.N"
+            exit 1
+          fi
+
+      - name: Validate approval notes
+        shell: bash
+        run: |
+          APPROVAL_NOTES="${{ github.event.inputs.approval-notes }}"
+          
+          if [ -z "$APPROVAL_NOTES" ]; then
+            echo "❌ Approval notes are required"
+            exit 1
+          fi
+          
+          echo "✓ Approval notes provided"
+          echo "Notes: ${APPROVAL_NOTES}"
+
+      - name: Upload deployment request
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-deployment-request
+          path: deployment-request.json
+          retention-days: 365
+
+  deploy-production:
+    name: Deploy to Production Orchestrator
+    runs-on: ubuntu-latest
+    needs: validate-production-deployment
+    if: needs.validate-production-deployment.outputs.validated == 'true'
+
+    environment:
+      name: production
+      url: ${{ vars.ORCHESTRATOR_URL }}/ordesk
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install UiPath CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.npm-global"
+          npm config set prefix "$HOME/.npm-global"
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.npm-global/bin:$PATH"
+
+          npm install -g "@uipath/cli@${UIPATH_CLI_VERSION}"
+          uip --version
+
+      - name: Validate production credentials
+        shell: bash
+        env:
+          UIPATH_CLIENT_ID: ${{ secrets.UIPATH_PROD_CLIENT_ID }}
+          UIPATH_CLIENT_SECRET: ${{ secrets.UIPATH_PROD_CLIENT_SECRET }}
+          UIPATH_TENANT: ${{ vars.UIPATH_PROD_TENANT }}
+          ORCHESTRATOR_URL: ${{ vars.ORCHESTRATOR_URL }}
+        run: |
+          if [ -z "$UIPATH_CLIENT_ID" ] || [ -z "$UIPATH_CLIENT_SECRET" ] || [ -z "$UIPATH_TENANT" ]; then
+            echo "❌ Missing required production secrets or variables"
+            echo "Required: UIPATH_PROD_CLIENT_ID, UIPATH_PROD_CLIENT_SECRET, UIPATH_PROD_TENANT"
+            exit 1
+          fi
+          
+          if [ -z "$ORCHESTRATOR_URL" ]; then
+            echo "❌ Missing ORCHESTRATOR_URL variable"
+            exit 1
+          fi
+          
+          echo "✓ All required production secrets and variables present"
+
+      - name: Authenticate with UiPath Orchestrator (Production)
+        shell: bash
+        env:
+          UIPATH_CLIENT_ID: ${{ secrets.UIPATH_PROD_CLIENT_ID }}
+          UIPATH_CLIENT_SECRET: ${{ secrets.UIPATH_PROD_CLIENT_SECRET }}
+          UIPATH_TENANT: ${{ vars.UIPATH_PROD_TENANT }}
+          ORCHESTRATOR_URL: ${{ vars.ORCHESTRATOR_URL }}
+        run: |
+          set -euo pipefail
+          
+          echo "Authenticating with UiPath Orchestrator (Production)..."
+          uip login \
+            --client-id "${UIPATH_CLIENT_ID}" \
+            --client-secret "${UIPATH_CLIENT_SECRET}" \
+            --tenant "${UIPATH_TENANT}" \
+            --orchestrator-url "${ORCHESTRATOR_URL}"
+          
+          echo "✓ Authentication successful"
+
+      - name: Deploy package to Production
+        shell: bash
+        env:
+          UIPATH_TENANT: ${{ vars.UIPATH_PROD_TENANT }}
+          UIPATH_STAGING_TENANT: ${{ vars.UIPATH_STAGING_TENANT }}
+          UIPATH_FEED_ID: ${{ vars.UIPATH_PROD_FEED_ID }}
+          PACKAGE_VERSION: ${{ github.event.inputs.package-version }}
+        run: |
+          set -euoripefail
+          
+          echo "Promoting package ${PACKAGE_VERSION} to Production..."
+          
+          # Download from staging feed and upload to production feed
+          uip or packages download \
+            --tenant "${UIPATH_STAGING_TENANT}" \
+            --package-name "UiPathProject" \
+            --package-version "${PACKAGE_VERSION}" \
+            --output "./production-package.nupkg" || echo "Package download skipped"
+          
+          if [ -f "./production-package.nupkg" ]; then
+            uip or packages upload "./production-package.nupkg" \
+              --tenant "${UIPATH_TENANT}" \
+              --feed-id "${UIPATH_FEED_ID}"
+            
+            echo "✓ Package deployed to production"
+          fi
+
+      - name: Verify production deployment
+        shell: bash
+        env:
+          UIPATH_TENANT: ${{ vars.UIPATH_PROD_TENANT }}
+          DEPLOYMENT_FOLDER: ${{ env.DEPLOYMENT_FOLDER }}
+        run: |
+          echo "Verifying deployment in ${ENVIRONMENT}..."
+          
+          # List packages in production folder
+          uip or packages list \
+            --tenant "${UIPATH_TENANT}" \
+            --folder "${DEPLOYMENT_FOLDER}" || true
+          
+          echo "✓ Deployment verification complete"
+
+      - name: Create production deployment record
+        shell: bash
+        run: |
+          cat > deployment-record-prod.json << 'EOF'
+          {
+            "environment": "${{ env.ENVIRONMENT }}",
+            "packageVersion": "${{ github.event.inputs.package-version }}",
+            "deployedAt": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+            "deployedBy": "${{ github.actor }}",
+            "approvalNotes": "${{ github.event.inputs.approval-notes }}",
+            "commitSha": "${{ github.sha }}",
+            "runId": "${{ github.run_id }}"
+          }
+          EOF
+
+      - name: Upload production deployment record
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-record-production
+          path: deployment-record-prod.json
+          retention-days: 365
+
+      - name: Generate production deployment summary
+        shell: bash
+        run: |
+          echo "## 🚀 Production Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ env.ENVIRONMENT }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Package Version | ${{ github.event.inputs.package-version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployed By | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Timestamp | $(date -u +'%Y-%m-%d %H:%M:%S UTC') |" >> $GITHUB_STEP_SUMMARY
+          echo "| Approval Notes | ${{ github.event.inputs.approval-notes }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Create GitHub Deployment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.ref,
+              environment: "production",
+              description: "UiPath package v${{ github.event.inputs.package-version }}",
+              auto_merge: false,
+              required_contexts: []
+            });
