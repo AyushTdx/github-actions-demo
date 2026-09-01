@@ -1,0 +1,9 @@
+      # Action for performing workflow analysis on a UiPath project
+      - name: UiPath Analyze
+        uses: Mikael-RnD/UiPath-Analyze@v1
+        with:
+          orchestratorTenant: MyTenant
+          orchestratorFolder: "MyFolder/SE"
+          orchestratorApplicationId: ${{ secrets.ORCHESTRATOR_APP_ID }}
+          orchestratorApplicationSecret: ${{ secrets.ORCHESTRATOR_APP_SECRET }}
+          orchestratorLogicalName: myorg

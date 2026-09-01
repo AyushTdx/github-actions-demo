@@ -1,0 +1,77 @@
+name: Package UiPath Project
+
+#on:
+#  push:
+#    branches:
+#      - main
+#  pull_request:
+#    branches:
+#      - main
+#  workflow_dispatch:
+
+env:
+  NODE_VERSION: "20"
+  UIPATH_CLI_VERSION: "1.0.0"
+  PROJECT_PATH: "./UiPathProject"
+  OUTPUT_PATH: "./output"
+
+jobs:
+  package:
+    name: Analyze and Package UiPath Project
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install UiPath CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.npm-global"
+          npm config set prefix "$HOME/.npm-global"
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.npm-global/bin:$PATH"
+
+          npm install -g "@uipath/cli@${UIPATH_CLI_VERSION}"
+          uip --version
+
+      - name: Verify UiPath project
+        shell: bash
+        run: |
+          test -f "${PROJECT_PATH}/project.json"
+          echo "UiPath project.json found."
+
+      - name: Restore UiPath dependencies
+        shell: bash
+        run: |
+          uip rpa restore "${PROJECT_PATH}"
+
+      - name: Analyze UiPath project
+        shell: bash
+        run: |
+          uip rpa analyze "${PROJECT_PATH}"
+
+      - name: Package UiPath project
+        shell: bash
+        run: |
+          mkdir -p "${OUTPUT_PATH}"
+          uip rpa pack "${PROJECT_PATH}" \
+            --output "${OUTPUT_PATH}"
+
+      - name: List generated package
+        shell: bash
+        run: |
+          ls -lh "${OUTPUT_PATH}"
+
+      - name: Upload UiPath package
+        uses: actions/upload-artifact@v4
+        with:
+          name: uipath-package
+          path: ./output/*.nupkg

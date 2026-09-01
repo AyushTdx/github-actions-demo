@@ -1,0 +1,113 @@
+name: Package and Upload UiPath Project
+
+#on:
+#  workflow_dispatch:
+
+#  push:
+#    branches:
+#      - main
+#    paths:
+#      - "UiPathProject/**"
+#      - ".github/workflows/uipath-package-upload.yml"
+
+env:
+  NODE_VERSION: "20"
+  UIPATH_CLI_VERSION: "1.0.0"
+  PROJECT_PATH: "./UiPathProject"
+  OUTPUT_PATH: "./output"
+
+jobs:
+  package-and-upload:
+    name: Package and Upload to Orchestrator
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install UiPath CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.npm-global"
+          npm config set prefix "$HOME/.npm-global"
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.npm-global/bin:$PATH"
+
+          npm install -g "@uipath/cli@${UIPATH_CLI_VERSION}"
+          uip --version
+
+      - name: Verify UiPath project
+        shell: bash
+        run: |
+          test -f "${PROJECT_PATH}/project.json"
+          echo "UiPath project found."
+
+      - name: Restore project dependencies
+        shell: bash
+        run: |
+          uip rpa restore "${PROJECT_PATH}"
+
+      - name: Analyze project
+        shell: bash
+        run: |
+          uip rpa analyze "${PROJECT_PATH}"
+
+      - name: Package UiPath project
+        shell: bash
+        run: |
+          mkdir -p "${OUTPUT_PATH}"
+
+          uip rpa pack "${PROJECT_PATH}" \
+            --output "${OUTPUT_PATH}" \
+            --version "1.0.${{ github.run_number }}"
+
+      - name: Locate generated package
+        shell: bash
+        run: |
+          PACKAGE=$(find "${OUTPUT_PATH}" -name "*.nupkg" -type f | head -1)
+
+          if [ -z "$PACKAGE" ]; then
+            echo "No .nupkg package was generated."
+            exit 1
+          fi
+
+          echo "Generated package: $PACKAGE"
+          echo "PACKAGE_PATH=$PACKAGE" >> "$GITHUB_ENV"
+
+      - name: Authenticate with UiPath
+        shell: bash
+        env:
+          UIPATH_CLIENT_ID: ${{ secrets.UIPATH_CLIENT_ID }}
+          UIPATH_CLIENT_SECRET: ${{ secrets.UIPATH_CLIENT_SECRET }}
+          UIPATH_TENANT: ${{ vars.UIPATH_TENANT }}
+        run: |
+          set -euo pipefail
+
+          uip login \
+            --client-id env.UIPATH_CLIENT_ID \
+            --client-secret env.UIPATH_CLIENT_SECRET \
+            --tenant "$UIPATH_TENANT"
+
+      - name: Upload package to Orchestrator
+        shell: bash
+        env:
+          UIPATH_TENANT: ${{ vars.UIPATH_TENANT }}
+          UIPATH_FEED_ID: ${{ vars.UIPATH_FEED_ID }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$UIPATH_FEED_ID" ]; then
+            uip or packages upload "$PACKAGE_PATH" \
+              --tenant "$UIPATH_TENANT" \
+              --feed-id "$UIPATH_FEED_ID"
+          else
+            uip or packages upload "$PACKAGE_PATH" \
+              --tenant "$UIPATH_TENANT"
+          fi
